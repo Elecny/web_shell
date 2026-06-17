@@ -14,11 +14,14 @@ from aiohttp import web
 
 AUTH_PASSWORD = os.environ.get('AUTH_PASSWORD', 'admin')
 SECRET_KEY = os.environ.get('SECRET_KEY', 'change-this-secret-key').encode()
-PROTECTED_ROUTES = {'/', '/ws', '/api/files', '/api/files/read', '/api/files/write', '/api/files/mkdir', '/api/files/delete', '/api/files/rename'}
+PROTECTED_ROUTES = {'/', '/ws', '/api/rootpath', '/api/files', '/api/files/read', '/api/files/write', '/api/files/mkdir', '/api/files/delete', '/api/files/rename'}
 
 COOKIE_NAME = 'session'
 
 HERE = Path(__file__).parent
+
+_SESSION_COOKIE = None
+_EXPECTED_SIG = None
 
 DEFAULT_SHELL = os.environ.get('SHELL') or pwd.getpwuid(os.getuid()).pw_shell or '/bin/bash'
 
@@ -87,19 +90,24 @@ def _set_size(fd, rows, cols):
 
 
 def _make_session_cookie():
-    val = 'authenticated'
-    sig = hmac.new(SECRET_KEY, val.encode(), 'sha256').hexdigest()
-    return f'{val}.{sig}'
+    global _SESSION_COOKIE
+    if _SESSION_COOKIE is None:
+        val = 'authenticated'
+        sig = hmac.new(SECRET_KEY, val.encode(), 'sha256').hexdigest()
+        _SESSION_COOKIE = f'{val}.{sig}'
+    return _SESSION_COOKIE
 
 
 def _check_session(request):
+    global _EXPECTED_SIG
     cookie = request.cookies.get(COOKIE_NAME)
     if not cookie:
         return False
     try:
         val, sig = cookie.split('.', 1)
-        expected = hmac.new(SECRET_KEY, val.encode(), 'sha256').hexdigest()
-        return hmac.compare_digest(sig, expected) and val == 'authenticated'
+        if _EXPECTED_SIG is None:
+            _EXPECTED_SIG = hmac.new(SECRET_KEY, b'authenticated', 'sha256').hexdigest()
+        return hmac.compare_digest(sig, _EXPECTED_SIG) and val == 'authenticated'
     except (ValueError, AttributeError):
         return False
 
@@ -143,12 +151,17 @@ def explorer_js_handler(request):
 
 def _safe_path(path_str):
     p = Path(path_str).resolve()
+    if not (p == HERE or str(p).startswith(str(HERE) + '/')):
+        raise ValueError('Path outside root')
     return p
 
 
 async def list_files(request):
     path_str = request.query.get('path', str(HERE))
-    p = _safe_path(path_str)
+    try:
+        p = _safe_path(path_str)
+    except ValueError:
+        return web.json_response({'error': 'Invalid path'}, status=400)
     try:
         entries = []
         with os.scandir(p) as it:
@@ -194,10 +207,15 @@ async def list_files(request):
 
 async def read_file(request):
     path_str = request.query.get('path', '')
-    p = _safe_path(path_str)
+    try:
+        p = _safe_path(path_str)
+    except ValueError:
+        return web.json_response({'error': 'Invalid path'}, status=400)
     try:
         if not p.is_file():
             return web.json_response({'error': 'Not a file'}, status=400)
+        if p.stat().st_size > 5 * 1024 * 1024:
+            return web.json_response({'error': 'File too large (>5MB)'}, status=413)
         content = p.read_bytes()
         return web.Response(body=content, content_type='application/octet-stream')
     except OSError as e:
@@ -211,7 +229,10 @@ async def write_file(request):
         return web.json_response({'error': 'Invalid JSON'}, status=400)
     path_str = data.get('path', '')
     content = data.get('content', '')
-    p = _safe_path(path_str)
+    try:
+        p = _safe_path(path_str)
+    except ValueError:
+        return web.json_response({'error': 'Invalid path'}, status=400)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(content, str):
@@ -229,7 +250,10 @@ async def make_directory(request):
     except Exception:
         return web.json_response({'error': 'Invalid JSON'}, status=400)
     path_str = data.get('path', '')
-    p = _safe_path(path_str)
+    try:
+        p = _safe_path(path_str)
+    except ValueError:
+        return web.json_response({'error': 'Invalid path'}, status=400)
     try:
         p.mkdir(parents=True, exist_ok=True)
         return web.json_response({'ok': True, 'path': str(p.resolve())})
@@ -243,7 +267,10 @@ async def delete_path(request):
     except Exception:
         return web.json_response({'error': 'Invalid JSON'}, status=400)
     path_str = data.get('path', '')
-    p = _safe_path(path_str)
+    try:
+        p = _safe_path(path_str)
+    except ValueError:
+        return web.json_response({'error': 'Invalid path'}, status=400)
     try:
         if p.is_dir():
             shutil.rmtree(p)
@@ -259,13 +286,20 @@ async def rename_path(request):
         data = await request.json()
     except Exception:
         return web.json_response({'error': 'Invalid JSON'}, status=400)
-    old_path = _safe_path(data.get('path', ''))
-    new_path = _safe_path(data.get('newPath', ''))
+    try:
+        old_path = _safe_path(data.get('path', ''))
+        new_path = _safe_path(data.get('newPath', ''))
+    except ValueError:
+        return web.json_response({'error': 'Invalid path'}, status=400)
     try:
         old_path.rename(new_path)
         return web.json_response({'ok': True, 'path': str(new_path.resolve())})
     except OSError as e:
         return web.json_response({'error': str(e)}, status=500)
+
+
+async def root_path_handler(request):
+    return web.json_response({'rootPath': str(HERE)})
 
 
 app = web.Application(middlewares=[auth_middleware])
@@ -278,6 +312,7 @@ app.router.add_route('POST', '/login', login_handler)
 app.router.add_get('/logout', logout_handler)
 
 # File explorer API
+app.router.add_get('/api/rootpath', root_path_handler)
 app.router.add_get('/api/files', list_files)
 app.router.add_get('/api/files/read', read_file)
 app.router.add_post('/api/files/write', write_file)

@@ -1,17 +1,29 @@
 class FileExplorer {
     constructor(container, options = {}) {
         this.container = container;
-        this.rootPath = options.rootPath || '/home/mony/Documents/web_shell';
+        this.rootPath = options.rootPath;
         this.onOpenFile = options.onOpenFile || (() => {});
         this.activeElement = null;
         this.contextMenu = null;
         this._entryCache = new Map();
+        this._refreshId = 0;
 
         this.initLayout();
-        this.loadDirectory(this.rootPath, this.treeEl, true).then(() => {
-            const rootDirs = this.treeEl.querySelectorAll(':scope > .fe-dir');
-            if (rootDirs.length > 0) rootDirs[0].click();
-        });
+        this._init();
+    }
+
+    async _init() {
+        try {
+            const resp = await fetch('/api/rootpath');
+            const data = await resp.json();
+            if (data.rootPath) {
+                this.rootPath = data.rootPath;
+            }
+        } catch (e) {
+            console.warn('Failed to fetch rootpath:', e);
+        }
+        this.buildBreadcrumb(this.rootPath);
+        this.loadDirectory(this.rootPath, this.treeEl, true);
 
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden) this.refresh();
@@ -137,11 +149,8 @@ class FileExplorer {
         if (dir) {
             dir.click();
         } else {
-            const rootName = this.rootPath.split('/').pop();
-            const parts = targetPath.split('/').filter(Boolean);
-            const rootIdx = parts.indexOf(rootName);
-            if (rootIdx === -1) return;
-            const childParts = parts.slice(rootIdx + 1);
+            if (!targetPath.startsWith(this.rootPath)) return;
+            const childParts = targetPath.slice(this.rootPath.length).split('/').filter(Boolean);
             let currentEl = this.treeEl;
             let acc = this.rootPath;
             for (const p of childParts) {
@@ -173,7 +182,10 @@ class FileExplorer {
 
             const fragment = document.createDocumentFragment();
             for (const entry of data.entries) {
-                if (this._entryCache.size > 5000) this._entryCache.clear();
+                if (this._entryCache.size > 5000) {
+                    const first = this._entryCache.keys().next().value;
+                    this._entryCache.delete(first);
+                }
                 this._entryCache.set(entry.path, entry);
                 fragment.appendChild(this.createItem(entry));
             }
@@ -193,26 +205,29 @@ class FileExplorer {
         }
     }
 
-    refresh() {
+    async refresh() {
+        const id = ++this._refreshId;
         const openPaths = [];
         this.treeEl.querySelectorAll('.fe-children.fe-open').forEach(el => openPaths.push(el.dataset.path));
         this.buildBreadcrumb(this.rootPath);
-        this.loadDirectory(this.rootPath, this.treeEl, true).then(() => {
-            for (const p of openPaths) {
-                const child = this.treeEl.querySelector(`.fe-children[data-path="${CSS.escape(p)}"]`);
-                if (child) {
-                    const dirEl = child.closest('.fe-dir');
-                    if (dirEl) {
-                        const chevron = dirEl.querySelector('.fe-chevron');
-                        if (chevron) chevron.textContent = '\u{25BC}';
-                        const icon = dirEl.querySelector('.fe-icon');
-                        if (icon) icon.textContent = '\u{1F4C2}';
-                        this.loadDirectory(p, child).then(() => child.classList.add('fe-open'));
-                    }
+        await this.loadDirectory(this.rootPath, this.treeEl, true);
+        if (id !== this._refreshId) return;
+        for (const p of openPaths) {
+            const child = this.treeEl.querySelector(`.fe-children[data-path="${CSS.escape(p)}"]`);
+            if (child) {
+                const dirEl = child.closest('.fe-dir');
+                if (dirEl) {
+                    const chevron = dirEl.querySelector('.fe-chevron');
+                    if (chevron) chevron.textContent = '\u{25BC}';
+                    const icon = dirEl.querySelector('.fe-icon');
+                    if (icon) icon.textContent = '\u{1F4C2}';
+                    await this.loadDirectory(p, child);
+                    if (id !== this._refreshId) return;
+                    child.classList.add('fe-open');
                 }
             }
-            this.setStatus('Refreshed');
-        });
+        }
+        this.setStatus('Refreshed');
     }
 
     createItem(entry) {
@@ -415,8 +430,10 @@ class FileExplorer {
 
         const menu = document.createElement('div');
         menu.className = 'fe-context-menu';
-        menu.style.left = x + 'px';
-        menu.style.top = y + 'px';
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        menu.style.left = Math.min(x, vw - 180) + 'px';
+        menu.style.top = Math.min(y, vh - 200) + 'px';
 
         const isDir = item.dataset.isDir === 'true';
         const groups = [
