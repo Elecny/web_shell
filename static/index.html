@@ -4,37 +4,69 @@
     <meta charset="utf-8">
     <title>Web Terminal</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css">
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        html, body { height: 100%; background: #000; overflow: hidden; }
-        #terminal { height: 100vh; padding: 8px; }
-        .xterm-viewport { padding: 4px; }
-    </style>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github-dark.min.css">
+    <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div id="terminal"></div>
+    <div id="app">
+        <div id="sidebar">
+            <div id="file-explorer"></div>
+        </div>
+        <div id="resizer"></div>
+        <div id="main">
+            <div id="main-tabs">
+                <div class="main-tab active" data-tab="terminal">Terminal</div>
+                <div class="main-tab" data-tab="editor">Editor</div>
+            </div>
+            <div id="main-content">
+                <div id="terminal" class="tab-content active"></div>
+                <div id="editor" class="tab-content">
+                    <div id="editor-tabs"></div>
+                    <pre id="editor-content" class="empty">Select a file from the explorer</pre>
+                </div>
+            </div>
+        </div>
+    </div>
     <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+    <script src="file_explorer.js"></script>
     <script>
+        const mainTabs = document.getElementById('main-tabs');
+        const terminalPane = document.getElementById('terminal');
+
+        function switchTab(name) {
+            mainTabs.querySelectorAll('.main-tab').forEach(t => t.classList.remove('active'));
+            mainTabs.querySelector(`[data-tab="${name}"]`).classList.add('active');
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+            document.getElementById(name).classList.add('active');
+            if (name === 'terminal') term.focus();
+        }
+
+        mainTabs.addEventListener('click', (e) => {
+            const tab = e.target.closest('.main-tab');
+            if (tab) switchTab(tab.dataset.tab);
+        });
+
         const term = new Terminal({
             cursorBlink: true,
-            fontSize: 16,
+            fontSize: 14,
             fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-            theme: { background: '#1a1a2e', foreground: '#e0e0e0', cursor: '#ffffff' },
+            theme: { background: '#1e1e2e', foreground: '#cdd6f4', cursor: '#f5e0dc', selectionBackground: '#45475a' },
         });
-        term.open(document.getElementById('terminal'));
+        term.open(terminalPane);
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const ws = new WebSocket(`${protocol}//${location.host}/ws${location.search}`);
         ws.binaryType = 'arraybuffer';
 
         ws.onopen = () => {
-            term.focus();
             const resize = () => {
                 const { cols, rows } = term;
                 ws.send(`RESIZE:${rows}:${cols}`);
             };
             term.onResize(resize);
             resize();
+            term.focus();
         };
 
         ws.onmessage = (ev) => {
@@ -45,10 +77,66 @@
             }
         };
 
-        term.onData(data => ws.send(data));
+        let refreshTimer = null;
+        term.onData(data => {
+            ws.send(data);
+            if (data === '\r' || data === '\n') {
+                clearTimeout(refreshTimer);
+                refreshTimer = setTimeout(() => explorer.refresh(), 800);
+            }
+        });
 
         ws.onclose = () => term.write('\r\n\x1b[31mConnection closed.\x1b[0m\r\n');
         ws.onerror = () => term.write('\r\n\x1b[31mConnection error.\x1b[0m\r\n');
+
+        const explorer = new FileExplorer(document.getElementById('file-explorer'), {
+            rootPath: '/home/mony/Documents/web_shell',
+            onOpenFile: async (filePath) => {
+                try {
+                    const resp = await fetch(`/api/files/read?path=${encodeURIComponent(filePath)}`);
+                    if (!resp.ok) throw new Error('Failed to read file');
+                    const text = await resp.text();
+                    const content = document.getElementById('editor-content');
+                    const tabs = document.getElementById('editor-tabs');
+                    const fileName = filePath.split('/').pop();
+                    tabs.replaceChildren();
+                    const tab = document.createElement('span');
+                    tab.className = 'editor-tab active';
+                    tab.textContent = fileName;
+                    tabs.appendChild(tab);
+                    const code = document.createElement('code');
+                    code.className = 'hljs';
+                    code.textContent = text;
+                    content.replaceChildren(code);
+                    content.classList.remove('empty');
+                    hljs.highlightElement(code);
+                    switchTab('editor');
+                } catch (err) {
+                    alert('Error: ' + err.message);
+                }
+            }
+        });
+
+        const resizer = document.getElementById('resizer');
+        let isResizing = false;
+        resizer.addEventListener('mousedown', (e) => {
+            isResizing = true;
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none';
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (!isResizing) return;
+            const sidebar = document.getElementById('sidebar');
+            let w = Math.max(180, Math.min(500, e.clientX));
+            sidebar.style.flex = `0 0 ${w}px`;
+        });
+        document.addEventListener('mouseup', () => {
+            if (isResizing) {
+                isResizing = false;
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+            }
+        });
     </script>
 </body>
 </html>
