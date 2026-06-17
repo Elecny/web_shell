@@ -29,6 +29,7 @@
         </div>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
     <script src="file_explorer.js"></script>
     <script>
@@ -40,7 +41,7 @@
             mainTabs.querySelector(`[data-tab="${name}"]`).classList.add('active');
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
             document.getElementById(name).classList.add('active');
-            if (name === 'terminal') term.focus();
+            if (name === 'terminal') { fitAddon.fit(); term.focus(); }
         }
 
         mainTabs.addEventListener('click', (e) => {
@@ -48,13 +49,16 @@
             if (tab) switchTab(tab.dataset.tab);
         });
 
+        const fitAddon = new FitAddon.FitAddon();
         const term = new Terminal({
             cursorBlink: true,
             fontSize: 14,
             fontFamily: 'Menlo, Monaco, "Courier New", monospace',
             theme: { background: '#1e1e2e', foreground: '#cdd6f4', cursor: '#f5e0dc', selectionBackground: '#45475a' },
         });
+        term.loadAddon(fitAddon);
         term.open(terminalPane);
+        fitAddon.fit();
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const ws = new WebSocket(`${protocol}//${location.host}/ws${location.search}`);
@@ -70,6 +74,10 @@
             resize();
             term.focus();
         };
+
+        window.addEventListener('resize', () => {
+            fitAddon.fit();
+        });
 
         ws.onmessage = (ev) => {
             if (ev.data instanceof ArrayBuffer) {
@@ -137,6 +145,7 @@
                 isResizing = false;
                 document.body.style.cursor = '';
                 document.body.style.userSelect = '';
+                fitAddon.fit();
             }
         });
     </script>

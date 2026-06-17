@@ -1,4 +1,5 @@
 import asyncio
+import gzip
 import hmac
 import os
 import pty
@@ -32,7 +33,7 @@ def _resolve_shell(request):
 
 
 async def shell_handler(request):
-    ws = web.WebSocketResponse(max_msg_size=65536)
+    ws = web.WebSocketResponse(max_msg_size=1024 * 1024)
     await ws.prepare(request)
 
     shell_path, shell_name = _resolve_shell(request)
@@ -46,38 +47,50 @@ async def shell_handler(request):
     loop = asyncio.get_running_loop()
 
     async def reader():
-        while True:
-            try:
+        try:
+            while True:
                 data = await loop.run_in_executor(None, os.read, fd, 65536)
                 if not data:
                     break
                 await ws.send_bytes(data)
-            except (ConnectionResetError, ConnectionError, OSError):
-                break
+        except (ConnectionResetError, ConnectionError, OSError):
+            pass
 
     async def writer():
-        async for msg in ws:
-            if msg.type == web.WSMsgType.TEXT:
-                text = msg.data
-                if text.startswith('RESIZE:'):
-                    try:
-                        _, rows, cols = text.split(':')
-                        _set_size(fd, int(rows), int(cols))
-                    except (ValueError, TypeError):
-                        pass
-                else:
-                    await loop.run_in_executor(None, os.write, fd, text.encode('utf-8'))
-            elif msg.type == web.WSMsgType.BINARY:
-                await loop.run_in_executor(None, os.write, fd, msg.data)
-            elif msg.type in (web.WSMsgType.CLOSED, web.WSMsgType.ERROR):
-                break
+        try:
+            async for msg in ws:
+                if msg.type == web.WSMsgType.TEXT:
+                    text = msg.data
+                    if text.startswith('RESIZE:'):
+                        try:
+                            _, rows, cols = text.split(':')
+                            _set_size(fd, int(rows), int(cols))
+                        except (ValueError, IndexError, TypeError):
+                            pass
+                    else:
+                        await loop.run_in_executor(None, os.write, fd, text.encode('utf-8'))
+                elif msg.type == web.WSMsgType.BINARY:
+                    await loop.run_in_executor(None, os.write, fd, msg.data)
+                elif msg.type in (web.WSMsgType.CLOSED, web.WSMsgType.ERROR):
+                    break
+        except (ConnectionResetError, ConnectionError, OSError):
+            pass
 
-    await asyncio.gather(reader(), writer())
+    reader_task = asyncio.ensure_future(reader())
+    writer_task = asyncio.ensure_future(writer())
+
+    done, pending = await asyncio.wait(
+        [reader_task, writer_task],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
 
     try:
         os.close(fd)
         os.kill(pid, signal.SIGTERM)
-        os.waitpid(pid, 0)
+        os.waitpid(pid, os.WNOHANG)
     except OSError:
         pass
 
@@ -85,6 +98,8 @@ async def shell_handler(request):
 
 
 def _set_size(fd, rows, cols):
+    rows = max(1, min(rows, 1000))
+    cols = max(1, min(cols, 1000))
     size = struct.pack("HHHH", rows, cols, 0, 0)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, size)
 
@@ -107,7 +122,7 @@ def _check_session(request):
         val, sig = cookie.split('.', 1)
         if _EXPECTED_SIG is None:
             _EXPECTED_SIG = hmac.new(SECRET_KEY, b'authenticated', 'sha256').hexdigest()
-        return hmac.compare_digest(sig, _EXPECTED_SIG) and val == 'authenticated'
+        return hmac.compare_digest(sig, _EXPECTED_SIG) and hmac.compare_digest(val, 'authenticated')
     except (ValueError, AttributeError):
         return False
 
@@ -117,7 +132,7 @@ async def login_handler(request):
         return web.FileResponse(HERE / 'static' / 'login.html')
     data = await request.post()
     password = data.get('password', '')
-    if password == AUTH_PASSWORD:
+    if hmac.compare_digest(password, AUTH_PASSWORD):
         resp = web.HTTPFound('/')
         resp.set_cookie(COOKIE_NAME, _make_session_cookie(), httponly=True, samesite='Lax', max_age=86400)
         raise resp
@@ -137,16 +152,34 @@ async def auth_middleware(request, handler):
     return await handler(request)
 
 
+@web.middleware
+async def gzip_middleware(request, handler):
+    resp = await handler(request)
+    if isinstance(resp, web.Response) and resp.body and 'gzip' in request.headers.get('Accept-Encoding', ''):
+        if len(resp.body) > 512:
+            compressed = gzip.compress(resp.body, compresslevel=5)
+            resp.body = compressed
+            resp.headers['Content-Encoding'] = 'gzip'
+            resp.headers['Content-Length'] = str(len(compressed))
+    return resp
+
+
+def _file_response_with_cache(path, cache_max_age=3600):
+    resp = web.FileResponse(path)
+    resp.headers['Cache-Control'] = f'public, max-age={cache_max_age}'
+    return resp
+
+
 def index_handler(request):
-    return web.FileResponse(HERE / 'static' / 'index.html')
+    return _file_response_with_cache(HERE / 'static' / 'index.html', cache_max_age=0)
 
 
 def style_handler(request):
-    return web.FileResponse(HERE / 'static' / 'style.css')
+    return _file_response_with_cache(HERE / 'static' / 'style.css')
 
 
 def explorer_js_handler(request):
-    return web.FileResponse(HERE / 'static' / 'file_explorer.js')
+    return _file_response_with_cache(HERE / 'static' / 'file_explorer.js')
 
 
 def _safe_path(path_str):
@@ -214,7 +247,8 @@ async def read_file(request):
     try:
         if not p.is_file():
             return web.json_response({'error': 'Not a file'}, status=400)
-        if p.stat().st_size > 5 * 1024 * 1024:
+        st = p.stat()
+        if st.st_size > 5 * 1024 * 1024:
             return web.json_response({'error': 'File too large (>5MB)'}, status=413)
         content = p.read_bytes()
         return web.Response(body=content, content_type='application/octet-stream')
@@ -302,7 +336,7 @@ async def root_path_handler(request):
     return web.json_response({'rootPath': str(HERE)})
 
 
-app = web.Application(middlewares=[auth_middleware])
+app = web.Application(middlewares=[auth_middleware, gzip_middleware])
 app.router.add_get('/ws', shell_handler)
 app.router.add_get('/', index_handler)
 app.router.add_get('/style.css', style_handler)

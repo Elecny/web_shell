@@ -113,10 +113,10 @@ body { background: #1e1e2e; color: #cdd6f4; }
 /* ─── Terminal ─── */
 
 #terminal {
-    padding: 4px;
+    padding: 0;
 }
 #terminal .xterm-viewport {
-    padding: 4px;
+    padding: 0;
 }
 
 /* ─── Editor ─── */

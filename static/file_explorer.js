@@ -78,7 +78,9 @@ class FileExplorer {
             }
         });
 
-        document.addEventListener('click', () => this.hideContextMenu());
+        document.addEventListener('click', () => {
+            if (this.contextMenu) this.hideContextMenu();
+        });
     }
 
     _toggleDir(item) {
@@ -182,9 +184,10 @@ class FileExplorer {
 
             const fragment = document.createDocumentFragment();
             for (const entry of data.entries) {
-                if (this._entryCache.size > 5000) {
-                    const first = this._entryCache.keys().next().value;
-                    this._entryCache.delete(first);
+                if (this._entryCache.has(entry.path)) {
+                    this._entryCache.delete(entry.path);
+                } else if (this._entryCache.size > 5000) {
+                    this._entryCache.delete(this._entryCache.keys().next().value);
                 }
                 this._entryCache.set(entry.path, entry);
                 fragment.appendChild(this.createItem(entry));
@@ -208,7 +211,7 @@ class FileExplorer {
     async refresh() {
         const id = ++this._refreshId;
         const openPaths = [];
-        this.treeEl.querySelectorAll('.fe-children.fe-open').forEach(el => openPaths.push(el.dataset.path));
+        for (const el of this.treeEl.querySelectorAll('.fe-children.fe-open')) openPaths.push(el.dataset.path);
         this.buildBreadcrumb(this.rootPath);
         await this.loadDirectory(this.rootPath, this.treeEl, true);
         if (id !== this._refreshId) return;
@@ -288,7 +291,8 @@ class FileExplorer {
         if (bytes === 0) return '';
         if (bytes < 1024) return bytes + ' B';
         if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
-        return (bytes / 1048576).toFixed(1) + ' MB';
+        if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+        return (bytes / 1073741824).toFixed(1) + ' GB';
     }
 
     selectItem(item) {
@@ -358,7 +362,7 @@ class FileExplorer {
     }
 
     action_collapse_all() {
-        this.treeEl.querySelectorAll('.fe-children.fe-open').forEach(el => {
+        for (const el of this.treeEl.querySelectorAll('.fe-children.fe-open')) {
             el.classList.remove('fe-open');
             const dirEl = el.closest('.fe-dir');
             if (dirEl) {
@@ -367,7 +371,7 @@ class FileExplorer {
                 const icon = dirEl.querySelector('.fe-icon');
                 if (icon) icon.textContent = '\u{1F4C1}';
             }
-        });
+        }
         this.buildBreadcrumb(this.rootPath);
         this.setStatus('Collapsed all');
     }
@@ -418,6 +422,7 @@ class FileExplorer {
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') input.blur();
             if (e.key === 'Escape') {
+                finished = true;
                 nameSpan.textContent = oldName;
                 item.classList.remove('fe-renaming');
             }
@@ -435,7 +440,6 @@ class FileExplorer {
         menu.style.left = Math.min(x, vw - 180) + 'px';
         menu.style.top = Math.min(y, vh - 200) + 'px';
 
-        const isDir = item.dataset.isDir === 'true';
         const groups = [
             [
                 {label: 'New File', action: 'new-file'},
