@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Web Terminal</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; background: #000; overflow: hidden; }
+        #terminal { height: 100vh; padding: 8px; }
+        .xterm-viewport { padding: 4px; }
+    </style>
+</head>
+<body>
+    <div id="terminal"></div>
+    <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
+    <script>
+        const term = new Terminal({
+            cursorBlink: true,
+            fontSize: 16,
+            fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+            theme: { background: '#1a1a2e', foreground: '#e0e0e0', cursor: '#ffffff' },
+        });
+        term.open(document.getElementById('terminal'));
+
+        const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${protocol}//${location.host}/ws${location.search}`);
+        ws.binaryType = 'arraybuffer';
+
+        ws.onopen = () => {
+            term.focus();
+            const resize = () => {
+                const { cols, rows } = term;
+                ws.send(`RESIZE:${rows}:${cols}`);
+            };
+            term.onResize(resize);
+            resize();
+        };
+
+        ws.onmessage = (ev) => {
+            if (ev.data instanceof ArrayBuffer) {
+                term.write(new Uint8Array(ev.data));
+            } else {
+                term.write(ev.data);
+            }
+        };
+
+        term.onData(data => ws.send(data));
+
+        ws.onclose = () => term.write('\r\n\x1b[31mConnection closed.\x1b[0m\r\n');
+        ws.onerror = () => term.write('\r\n\x1b[31mConnection error.\x1b[0m\r\n');
+    </script>
+</body>
+</html>

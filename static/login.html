@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Login - Web Terminal</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; background: #1a1a2e; font-family: Menlo, Monaco, "Courier New", monospace; display: flex; align-items: center; justify-content: center; }
+        .login-box { background: #16213e; padding: 40px; border-radius: 8px; box-shadow: 0 0 20px rgba(0,0,0,0.5); }
+        h1 { color: #e0e0e0; font-size: 20px; margin-bottom: 24px; text-align: center; }
+        input { display: block; width: 280px; padding: 12px; margin-bottom: 16px; background: #0f3460; border: 1px solid #1a3a6e; color: #e0e0e0; font-size: 14px; border-radius: 4px; outline: none; font-family: inherit; }
+        input:focus { border-color: #533483; }
+        button { width: 100%; padding: 12px; background: #533483; color: #e0e0e0; border: none; font-size: 14px; border-radius: 4px; cursor: pointer; font-family: inherit; }
+        button:hover { background: #6b44a0; }
+        .error { color: #e74c3c; text-align: center; margin-bottom: 16px; font-size: 13px; }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <h1>Web Terminal Login</h1>
+        <form method="post" action="/login">
+            <input type="password" name="password" placeholder="Password" autofocus>
+            <button type="submit">Login</button>
+        </form>
+    </div>
+</body>
+</html>
