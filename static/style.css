@@ -1,6 +1,6 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { height: 100%; overflow: hidden; font-family: Menlo, Monaco, "Courier New", monospace; font-size: 13px; }
-body { background: #1e1e2e; color: #cdd6f4; }
+body { background: #11111b; color: #cdd6f4; }
 
 ::selection { background: #45475a; color: #cdd6f4; }
 

@@ -9,7 +9,7 @@ class FileExplorer {
         this._refreshId = 0;
 
         this.initLayout();
-        this._init();
+        this._init().catch(err => console.error('FileExplorer init failed:', err));
     }
 
     async _init() {
@@ -23,11 +23,30 @@ class FileExplorer {
             console.warn('Failed to fetch rootpath:', e);
         }
         this.buildBreadcrumb(this.rootPath);
-        this.loadDirectory(this.rootPath, this.treeEl, true);
+        await this.loadDirectory(this.rootPath, this.treeEl, true);
 
-        document.addEventListener('visibilitychange', () => {
+        this._onVisibilityChange = () => {
             if (!document.hidden) this.refresh();
-        });
+        };
+        document.addEventListener('visibilitychange', this._onVisibilityChange);
+
+        this._onDocClick = () => {
+            if (this.contextMenu) this.hideContextMenu();
+        };
+        document.addEventListener('click', this._onDocClick);
+    }
+
+    destroy() {
+        if (this._onVisibilityChange) {
+            document.removeEventListener('visibilitychange', this._onVisibilityChange);
+            this._onVisibilityChange = null;
+        }
+        if (this._onDocClick) {
+            document.removeEventListener('click', this._onDocClick);
+            this._onDocClick = null;
+        }
+        this.hideContextMenu();
+        this._entryCache.clear();
     }
 
     initLayout() {
@@ -63,7 +82,7 @@ class FileExplorer {
             e.stopPropagation();
             this.selectItem(item);
             if (item.dataset.isDir === 'true') {
-                this._toggleDir(item);
+                this._toggleDir(item).catch(() => {});
             } else {
                 this.onOpenFile(item.dataset.path);
             }
@@ -77,13 +96,9 @@ class FileExplorer {
                 this.startRename(item);
             }
         });
-
-        document.addEventListener('click', () => {
-            if (this.contextMenu) this.hideContextMenu();
-        });
     }
 
-    _toggleDir(item) {
+    async _toggleDir(item) {
         const children = item.querySelector(':scope > .fe-children');
         const chevron = item.querySelector(':scope > .fe-chevron');
         const icon = item.querySelector(':scope > .fe-icon');
@@ -95,7 +110,7 @@ class FileExplorer {
             if (chevron) chevron.textContent = '\u{25BC}';
             if (icon) icon.textContent = '\u{1F4C2}';
             if (!children.dataset.loaded) {
-                this.loadDirectory(item.dataset.path, children);
+                await this.loadDirectory(item.dataset.path, children);
             }
             children.classList.add('fe-open');
         }
@@ -171,26 +186,27 @@ class FileExplorer {
             parentEl.replaceChildren();
             const spinner = document.createElement('div');
             spinner.className = 'fe-spinner';
-            const ring = document.createElement('div');
-            ring.className = 'fe-spinner-ring';
-            spinner.appendChild(ring);
+            spinner.innerHTML = '<div class="fe-spinner-ring"></div>';
             parentEl.appendChild(spinner);
             parentEl.dataset.path = dirPath;
-            parentEl.dataset.loaded = 'true';
 
             const resp = await fetch(`/api/files?path=${encodeURIComponent(dirPath)}`);
             const data = await resp.json();
             if (data.error) throw new Error(data.error);
 
+            parentEl.dataset.loaded = 'true';
             const fragment = document.createDocumentFragment();
             for (const entry of data.entries) {
-                if (this._entryCache.has(entry.path)) {
-                    this._entryCache.delete(entry.path);
-                } else if (this._entryCache.size > 5000) {
-                    this._entryCache.delete(this._entryCache.keys().next().value);
-                }
                 this._entryCache.set(entry.path, entry);
                 fragment.appendChild(this.createItem(entry));
+            }
+            if (this._entryCache.size > 5000) {
+                const iter = this._entryCache.keys();
+                for (let i = 0; i < 500; i++) {
+                    const key = iter.next().value;
+                    if (key === undefined) break;
+                    this._entryCache.delete(key);
+                }
             }
             if (data.entries.length === 0) {
                 const empty = document.createElement('div');
@@ -200,6 +216,7 @@ class FileExplorer {
             }
             parentEl.replaceChildren(fragment);
         } catch (err) {
+            delete parentEl.dataset.loaded;
             parentEl.replaceChildren();
             const errDiv = document.createElement('div');
             errDiv.className = 'fe-error';
@@ -215,7 +232,7 @@ class FileExplorer {
         this.buildBreadcrumb(this.rootPath);
         await this.loadDirectory(this.rootPath, this.treeEl, true);
         if (id !== this._refreshId) return;
-        for (const p of openPaths) {
+        const reloads = openPaths.map(async (p) => {
             const child = this.treeEl.querySelector(`.fe-children[data-path="${CSS.escape(p)}"]`);
             if (child) {
                 const dirEl = child.closest('.fe-dir');
@@ -229,7 +246,9 @@ class FileExplorer {
                     child.classList.add('fe-open');
                 }
             }
-        }
+        });
+        await Promise.all(reloads);
+        if (id !== this._refreshId) return;
         this.setStatus('Refreshed');
     }
 
@@ -280,7 +299,8 @@ class FileExplorer {
         if (entry.is_dir) {
             icon.textContent = '\u{1F4C1}';
         } else {
-            const ext = entry.name.includes('.') ? entry.name.split('.').pop().toLowerCase() : '';
+            const dotIdx = entry.name.lastIndexOf('.');
+            const ext = dotIdx > 0 ? entry.name.substring(dotIdx + 1).toLowerCase() : '';
             icon.textContent = FILE_SYMBOLS[ext] || '\u{1F4C4}';
             if (FILE_EXT_COLORS[ext]) icon.style.color = FILE_EXT_COLORS[ext];
         }
@@ -395,6 +415,8 @@ class FileExplorer {
         const finish = async () => {
             if (finished) return;
             finished = true;
+            input.removeEventListener('blur', finish);
+            input.removeEventListener('keydown', onKey);
             const newName = input.value.trim();
             if (newName && newName !== oldName) {
                 const parentPath = this._getParentPath(item);
@@ -418,15 +440,19 @@ class FileExplorer {
             item.classList.remove('fe-renaming');
         };
 
-        input.addEventListener('blur', finish);
-        input.addEventListener('keydown', (e) => {
+        const onKey = (e) => {
             if (e.key === 'Enter') input.blur();
             if (e.key === 'Escape') {
                 finished = true;
+                input.removeEventListener('blur', finish);
+                input.removeEventListener('keydown', onKey);
                 nameSpan.textContent = oldName;
                 item.classList.remove('fe-renaming');
             }
-        });
+        };
+
+        input.addEventListener('blur', finish);
+        input.addEventListener('keydown', onKey);
     }
 
     showContextMenu(x, y, item) {
@@ -440,37 +466,34 @@ class FileExplorer {
         menu.style.left = Math.min(x, vw - 180) + 'px';
         menu.style.top = Math.min(y, vh - 200) + 'px';
 
-        const groups = [
-            [
-                {label: 'New File', action: 'new-file'},
-                {label: 'New Folder', action: 'new-folder'},
-            ],
-            [
-                {label: 'Open', action: 'open'},
-                {label: 'Rename', action: 'rename'},
-                {label: 'Delete', action: 'delete'},
-            ],
-            [{label: 'Refresh', action: 'refresh'}],
+        const actions = [
+            {label: 'New File', action: 'new-file'},
+            {label: 'New Folder', action: 'new-folder'},
+            null,
+            {label: 'Open', action: 'open'},
+            {label: 'Rename', action: 'rename'},
+            {label: 'Delete', action: 'delete'},
+            null,
+            {label: 'Refresh', action: 'refresh'},
         ];
 
-        for (const group of groups) {
-            for (const a of group) {
-                const d = document.createElement('div');
-                d.className = 'fe-context-item';
-                const ls = document.createElement('span');
-                ls.textContent = a.label;
-                d.appendChild(ls);
-                if (a.label === 'Delete') d.classList.add('fe-context-danger');
-                d.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    this.hideContextMenu();
-                    this['context_' + a.action](item);
-                });
-                menu.appendChild(d);
+        for (const a of actions) {
+            if (a === null) {
+                const sep = document.createElement('div');
+                sep.className = 'fe-context-sep';
+                menu.appendChild(sep);
+                continue;
             }
-            const sep = document.createElement('div');
-            sep.className = 'fe-context-sep';
-            menu.appendChild(sep);
+            const d = document.createElement('div');
+            d.className = 'fe-context-item';
+            d.textContent = a.label;
+            if (a.label === 'Delete') d.classList.add('fe-context-danger');
+            d.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.hideContextMenu();
+                this['context_' + a.action](item);
+            });
+            menu.appendChild(d);
         }
 
         this.container.appendChild(menu);

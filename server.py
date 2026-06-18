@@ -1,10 +1,13 @@
 import asyncio
 import gzip
+import hashlib
 import hmac
+import mimetypes
 import os
 import pty
 import shutil
 import struct
+import tempfile
 import termios
 import fcntl
 import signal
@@ -27,8 +30,13 @@ _EXPECTED_SIG = None
 DEFAULT_SHELL = os.environ.get('SHELL') or pwd.getpwuid(os.getuid()).pw_shell or '/bin/bash'
 
 
+_ALLOWED_SHELLS = frozenset({'/bin/bash', '/bin/sh', '/bin/zsh', '/bin/fish', '/usr/bin/bash', '/usr/bin/sh', '/usr/bin/zsh', '/usr/bin/fish'})
+
+
 def _resolve_shell(request):
     shell = request.query.get('shell', DEFAULT_SHELL)
+    if shell not in _ALLOWED_SHELLS:
+        shell = DEFAULT_SHELL
     return shell, os.path.basename(shell)
 
 
@@ -89,7 +97,13 @@ async def shell_handler(request):
 
     try:
         os.close(fd)
+    except OSError:
+        pass
+    try:
         os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+    try:
         os.waitpid(pid, os.WNOHANG)
     except OSError:
         pass
@@ -122,7 +136,9 @@ def _check_session(request):
         val, sig = cookie.split('.', 1)
         if _EXPECTED_SIG is None:
             _EXPECTED_SIG = hmac.new(SECRET_KEY, b'authenticated', 'sha256').hexdigest()
-        return hmac.compare_digest(sig, _EXPECTED_SIG) and hmac.compare_digest(val, 'authenticated')
+        sig_ok = hmac.compare_digest(sig, _EXPECTED_SIG)
+        val_ok = hmac.compare_digest(val, 'authenticated')
+        return sig_ok and val_ok
     except (ValueError, AttributeError):
         return False
 
@@ -152,12 +168,25 @@ async def auth_middleware(request, handler):
     return await handler(request)
 
 
+_gzip_cache = {}
+_GZIP_CACHE_MAX = 64
+
 @web.middleware
 async def gzip_middleware(request, handler):
     resp = await handler(request)
     if isinstance(resp, web.Response) and resp.body and 'gzip' in request.headers.get('Accept-Encoding', ''):
-        if len(resp.body) > 512:
-            compressed = gzip.compress(resp.body, compresslevel=5)
+        body = resp.body
+        body_len = len(body)
+        if body_len > 512:
+            cache_key = hashlib.md5(body, usedforsecurity=False).digest()
+            cached = _gzip_cache.get(cache_key)
+            if cached is None:
+                compressed = gzip.compress(body, compresslevel=5)
+                if len(_gzip_cache) >= _GZIP_CACHE_MAX:
+                    _gzip_cache.clear()
+                _gzip_cache[cache_key] = compressed
+            else:
+                compressed = cached
             resp.body = compressed
             resp.headers['Content-Encoding'] = 'gzip'
             resp.headers['Content-Length'] = str(len(compressed))
@@ -196,43 +225,25 @@ async def list_files(request):
     except ValueError:
         return web.json_response({'error': 'Invalid path'}, status=400)
     try:
-        entries = []
+        dirs = []
+        files = []
         with os.scandir(p) as it:
-            dirs = []
-            files = []
             for entry in it:
                 try:
-                    is_dir = entry.is_dir(follow_symlinks=False)
                     name = entry.name
-                    if is_dir:
-                        dirs.append((name, entry.path))
+                    if entry.is_dir():
+                        dirs.append({'name': name, 'path': entry.path, 'is_dir': True, 'size': 0, 'mtime': 0})
                     else:
-                        st = entry.stat()
-                        files.append((name, entry.path, st.st_size, st.st_mtime))
+                        st = entry.stat(follow_symlinks=False)
+                        files.append({'name': name, 'path': entry.path, 'is_dir': False, 'size': st.st_size, 'mtime': st.st_mtime})
                 except OSError:
                     continue
-            dirs.sort(key=lambda e: e[0].lower())
-            files.sort(key=lambda e: e[0].lower())
-            for name, path in dirs:
-                entries.append({
-                    'name': name,
-                    'path': path,
-                    'is_dir': True,
-                    'size': 0,
-                    'mtime': 0,
-                })
-            for name, path, size, mtime in files:
-                entries.append({
-                    'name': name,
-                    'path': path,
-                    'is_dir': False,
-                    'size': size,
-                    'mtime': mtime,
-                })
+        dirs.sort(key=lambda e: e['name'].lower())
+        files.sort(key=lambda e: e['name'].lower())
         return web.json_response({
             'path': str(p),
             'parent': str(p.parent) if p.parent != p else None,
-            'entries': entries,
+            'entries': dirs + files,
         })
     except OSError as e:
         return web.json_response({'error': str(e)}, status=500)
@@ -251,7 +262,10 @@ async def read_file(request):
         if st.st_size > 5 * 1024 * 1024:
             return web.json_response({'error': 'File too large (>5MB)'}, status=413)
         content = p.read_bytes()
-        return web.Response(body=content, content_type='application/octet-stream')
+        content_type, _ = mimetypes.guess_type(str(p))
+        if content_type is None:
+            content_type = 'application/octet-stream'
+        return web.Response(body=content, content_type=content_type)
     except OSError as e:
         return web.json_response({'error': str(e)}, status=500)
 
@@ -269,10 +283,24 @@ async def write_file(request):
         return web.json_response({'error': 'Invalid path'}, status=400)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        if isinstance(content, str):
-            p.write_text(content)
-        else:
-            p.write_bytes(content)
+        fd, tmp_path = tempfile.mkstemp(dir=p.parent, suffix='.tmp')
+        try:
+            if isinstance(content, str):
+                os.write(fd, content.encode('utf-8'))
+            else:
+                os.write(fd, content)
+            os.close(fd)
+            os.replace(tmp_path, p)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
         return web.json_response({'ok': True, 'path': str(p.resolve())})
     except OSError as e:
         return web.json_response({'error': str(e)}, status=500)
@@ -307,7 +335,7 @@ async def delete_path(request):
         return web.json_response({'error': 'Invalid path'}, status=400)
     try:
         if p.is_dir():
-            shutil.rmtree(p)
+            shutil.rmtree(p, onerror=lambda func, path, exc: None)
         else:
             p.unlink()
         return web.json_response({'ok': True})
